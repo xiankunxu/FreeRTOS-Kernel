@@ -139,9 +139,6 @@
         #define portSET_INTERRUPT_MASK()                  rtos_interrupt_mask_all()
         #define portCLEAR_INTERRUPT_MASK( ulState )       rtos_interrupt_mask_set( ulState )
 
-        #define portSET_INTERRUPT_MASK_FROM_ISR()         ( 0 )
-        #define portCLEAR_INTERRUPT_MASK_FROM_ISR( x )    ( ( void ) x )
-
 /*
  * Will enable interrupts if ulState is non-zero.
  */
@@ -155,10 +152,11 @@
 
         #define portASSERT_IF_IN_ISR()                    configASSERT( portCHECK_IF_IN_ISR() == 0 )
 
-        #define portGET_ISR_LOCK()                        rtos_lock_acquire( 0 )
-        #define portRELEASE_ISR_LOCK()                    rtos_lock_release( 0 )
-        #define portGET_TASK_LOCK()                       rtos_lock_acquire( 1 )
-        #define portRELEASE_TASK_LOCK()                   rtos_lock_release( 1 )
+        #define portGET_ISR_LOCK( xCoreID )               do{ ( void )( xCoreID ); rtos_lock_acquire( 0 ); } while( 0 )
+        #define portRELEASE_ISR_LOCK( xCoreID )           do{ ( void )( xCoreID ); rtos_lock_release( 0 ); } while( 0 )
+        #define portGET_TASK_LOCK( xCoreID )              do{ ( void )( xCoreID ); rtos_lock_acquire( 1 ); } while( 0 )
+        #define portRELEASE_TASK_LOCK( xCoreID )          do{ ( void )( xCoreID ); rtos_lock_release( 1 ); } while( 0 )
+
 
         void vTaskEnterCritical( void );
         void vTaskExitCritical( void );

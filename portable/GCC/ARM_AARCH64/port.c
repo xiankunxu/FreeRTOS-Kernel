@@ -1,6 +1,6 @@
 /*
  * FreeRTOS Kernel <DEVELOPMENT BRANCH>
- * Copyright (C) 2021 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ * Copyright (C) 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * SPDX-License-Identifier: MIT
  *
@@ -32,6 +32,14 @@
 /* Scheduler includes. */
 #include "FreeRTOS.h"
 #include "task.h"
+
+#ifndef configINTERRUPT_CONTROLLER_BASE_ADDRESS
+    #error "configINTERRUPT_CONTROLLER_BASE_ADDRESS must be defined. See www.FreeRTOS.org/Using-FreeRTOS-on-Cortex-A-Embedded-Processors.html"
+#endif
+
+#ifndef configINTERRUPT_CONTROLLER_CPU_INTERFACE_OFFSET
+    #error "configINTERRUPT_CONTROLLER_CPU_INTERFACE_OFFSET must be defined.  See www.FreeRTOS.org/Using-FreeRTOS-on-Cortex-A-Embedded-Processors.html"
+#endif
 
 #ifndef configUNIQUE_INTERRUPT_PRIORITIES
     #error "configUNIQUE_INTERRUPT_PRIORITIES must be defined.  See www.FreeRTOS.org/Using-FreeRTOS-on-Cortex-A-Embedded-Processors.html"
@@ -99,6 +107,11 @@
     #define portINITIAL_PSTATE           ( portEL3 | portSP_EL0 )
 #endif
 
+
+/* Used by portASSERT_IF_INTERRUPT_PRIORITY_INVALID() when ensuring the binary
+ * point is zero. */
+#define portBINARY_POINT_BITS      ( ( uint8_t ) 0x03 )
+
 /* Masks all bits in the APSR other than the mode bits. */
 #define portAPSR_MODE_BITS_MASK    ( 0x0C )
 
@@ -106,20 +119,23 @@
 #define portDAIF_I                 ( 0x80 )
 
 /* Macro to unmask all interrupt priorities. */
-/* s3_0_c4_c6_0 is ICC_PMR_EL1. */
-#define portCLEAR_INTERRUPT_MASK()                     \
-    {                                                  \
-        __asm volatile ( "MSR DAIFSET, #2        \n"   \
-                         "DSB SY                 \n"   \
-                         "ISB SY                 \n"   \
-                         "MSR s3_0_c4_c6_0, %0   \n"   \
-                         "DSB SY                 \n"   \
-                         "ISB SY                 \n"   \
-                         "MSR DAIFCLR, #2        \n"   \
-                         "DSB SY                 \n"   \
-                         "ISB SY                 \n"   \
-                         ::"r" ( portUNMASK_VALUE ) ); \
+#define portCLEAR_INTERRUPT_MASK()                            \
+    {                                                         \
+        portDISABLE_INTERRUPTS();                             \
+        portICCPMR_PRIORITY_MASK_REGISTER = portUNMASK_VALUE; \
+        __asm volatile ( "DSB SY     \n"                      \
+                         "ISB SY     \n" );                   \
+        portENABLE_INTERRUPTS();                              \
     }
+
+/* Hardware specifics used when sanity checking the configuration. */
+#define portINTERRUPT_PRIORITY_REGISTER_OFFSET    0x400UL
+#define portMAX_8_BIT_VALUE                       ( ( uint8_t ) 0xff )
+#define portBIT_0_SET                             ( ( uint8_t ) 0x01 )
+
+/* The space on the stack required to hold the FPU registers.
+ * There are 32 128-bit registers.*/
+#define portFPU_REGISTER_WORDS     ( 32 * 2 )
 
 /*-----------------------------------------------------------*/
 
@@ -150,6 +166,9 @@ uint64_t ullPortYieldRequired = pdFALSE;
 uint64_t ullPortInterruptNesting = 0;
 
 /* Used in the ASM code. */
+__attribute__( ( used ) ) const uint64_t ullICCEOIR = portICCEOIR_END_OF_INTERRUPT_REGISTER_ADDRESS;
+__attribute__( ( used ) ) const uint64_t ullICCIAR = portICCIAR_INTERRUPT_ACKNOWLEDGE_REGISTER_ADDRESS;
+__attribute__( ( used ) ) const uint64_t ullICCPMR = portICCPMR_PRIORITY_MASK_REGISTER_ADDRESS;
 __attribute__( ( used ) ) const uint64_t ullMaxAPIPriorityMask = ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT );
 
 /*-----------------------------------------------------------*/
@@ -229,23 +248,47 @@ StackType_t * pxPortInitialiseStack( StackType_t * pxTopOfStack,
     *pxTopOfStack = ( StackType_t ) 0x00;         /* XZR - has no effect, used so there are an even number of registers. */
     pxTopOfStack--;
     *pxTopOfStack = ( StackType_t ) 0x00;         /* R30 - procedure call link register. */
-    pxTopOfStack--;
 
+    pxTopOfStack--;
     *pxTopOfStack = portINITIAL_PSTATE;
-    pxTopOfStack--;
 
+    pxTopOfStack--;
     *pxTopOfStack = ( StackType_t ) pxCode; /* Exception return address. */
-    pxTopOfStack--;
 
-    /* The task will start with a critical nesting count of 0 as interrupts are
-     * enabled. */
-    *pxTopOfStack = portNO_CRITICAL_NESTING;
-    pxTopOfStack--;
+    #if ( configUSE_TASK_FPU_SUPPORT == 1 )
+    {
+        /* The task will start with a critical nesting count of 0 as interrupts are
+        * enabled. */
+        pxTopOfStack--;
+        *pxTopOfStack = portNO_CRITICAL_NESTING;
 
-    /* The task will start without a floating point context.  A task that uses
-     * the floating point hardware must call vPortTaskUsesFPU() before executing
-     * any floating point instructions. */
-    *pxTopOfStack = portNO_FLOATING_POINT_CONTEXT;
+        /* The task will start without a floating point context.  A task that
+         * uses the floating point hardware must call vPortTaskUsesFPU() before
+         * executing any floating point instructions. */
+        pxTopOfStack--;
+        *pxTopOfStack = portNO_FLOATING_POINT_CONTEXT;
+    }
+    #elif ( configUSE_TASK_FPU_SUPPORT == 2 )
+    {
+        /* The task will start with a floating point context.  Leave enough
+         * space for the registers - and ensure they are initialised to 0. */
+        pxTopOfStack -= portFPU_REGISTER_WORDS;
+        memset( pxTopOfStack, 0x00, portFPU_REGISTER_WORDS * sizeof( StackType_t ) );
+
+        /* The task will start with a critical nesting count of 0 as interrupts are
+        * enabled. */
+        pxTopOfStack--;
+        *pxTopOfStack = portNO_CRITICAL_NESTING;
+
+        pxTopOfStack--;
+        *pxTopOfStack = pdTRUE;
+        ullPortTaskHasFPUContext = pdTRUE;
+    }
+    #else /* if ( configUSE_TASK_FPU_SUPPORT == 1 ) */
+    {
+        #error "Invalid configUSE_TASK_FPU_SUPPORT setting - configUSE_TASK_FPU_SUPPORT must be set to 1, 2, or left undefined."
+    }
+    #endif /* if ( configUSE_TASK_FPU_SUPPORT == 1 ) */
 
     return pxTopOfStack;
 }
@@ -255,11 +298,49 @@ BaseType_t xPortStartScheduler( void )
 {
     uint32_t ulAPSR;
 
-    __asm volatile ( "MRS %0, CurrentEL" : "=r" ( ulAPSR ) );
+    #if ( configASSERT_DEFINED == 1 )
+    {
+        volatile uint8_t ucOriginalPriority;
+        volatile uint8_t * const pucFirstUserPriorityRegister = ( volatile uint8_t * const ) ( configINTERRUPT_CONTROLLER_BASE_ADDRESS + portINTERRUPT_PRIORITY_REGISTER_OFFSET );
+        volatile uint8_t ucMaxPriorityValue;
 
+        /* Determine how many priority bits are implemented in the GIC.
+         *
+         * Save the interrupt priority value that is about to be clobbered. */
+        ucOriginalPriority = *pucFirstUserPriorityRegister;
+
+        /* Determine the number of priority bits available.  First write to
+         * all possible bits. */
+        *pucFirstUserPriorityRegister = portMAX_8_BIT_VALUE;
+
+        /* Read the value back to see how many bits stuck. */
+        ucMaxPriorityValue = *pucFirstUserPriorityRegister;
+
+        /* Shift to the least significant bits. */
+        while( ( ucMaxPriorityValue & portBIT_0_SET ) != portBIT_0_SET )
+        {
+            ucMaxPriorityValue >>= ( uint8_t ) 0x01;
+        }
+
+        /* Sanity check configUNIQUE_INTERRUPT_PRIORITIES matches the read
+         * value. */
+
+        configASSERT( ucMaxPriorityValue >= portLOWEST_INTERRUPT_PRIORITY );
+
+
+        /* Restore the clobbered interrupt priority register to its original
+         * value. */
+        *pucFirstUserPriorityRegister = ucOriginalPriority;
+    }
+    #endif /* configASSERT_DEFINED */
+
+
+    /* At the time of writing, the BSP only supports EL3. */
+    __asm volatile ( "MRS %0, CurrentEL" : "=r" ( ulAPSR ) );
     ulAPSR &= portAPSR_MODE_BITS_MASK;
 
     #if defined( GUEST )
+    #warning "Building for execution as a guest under XEN. THIS IS NOT A FULLY TESTED PATH."
         configASSERT( ulAPSR == portEL1 );
 
         if( ulAPSR == portEL1 )
@@ -269,17 +350,25 @@ BaseType_t xPortStartScheduler( void )
         if( ulAPSR == portEL3 )
     #endif
     {
-        /* Interrupts are turned off in the CPU itself to ensure a tick does
-         * not execute while the scheduler is being started.  Interrupts are
-         * automatically turned back on in the CPU when the first task starts
-         * executing. */
-        portDISABLE_INTERRUPTS();
+        /* Only continue if the binary point value is set to its lowest possible
+         * setting.  See the comments in vPortValidateInterruptPriority() below for
+         * more information. */
+        configASSERT( ( portICCBPR_BINARY_POINT_REGISTER & portBINARY_POINT_BITS ) <= portMAX_BINARY_POINT_VALUE );
 
-        /* Start the timer that generates the tick ISR. */
-        configSETUP_TICK_INTERRUPT();
+        if( ( portICCBPR_BINARY_POINT_REGISTER & portBINARY_POINT_BITS ) <= portMAX_BINARY_POINT_VALUE )
+        {
+            /* Interrupts are turned off in the CPU itself to ensure a tick does
+             * not execute while the scheduler is being started.  Interrupts are
+             * automatically turned back on in the CPU when the first task starts
+             * executing. */
+            portDISABLE_INTERRUPTS();
 
-        /* Start the first task executing. */
-        vPortRestoreTaskContext();
+            /* Start the timer that generates the tick ISR. */
+            configSETUP_TICK_INTERRUPT();
+
+            /* Start the first task executing. */
+            vPortRestoreTaskContext();
+        }
     }
 
     return 0;
@@ -341,10 +430,7 @@ void FreeRTOS_Tick_Handler( void )
     /* Must be the lowest possible priority. */
     #if !defined( QEMU )
     {
-        uint64_t ullRunningInterruptPriority;
-        /* s3_0_c12_c11_3 is ICC_RPR_EL1. */
-        __asm volatile ( "MRS %0, s3_0_c12_c11_3" : "=r" ( ullRunningInterruptPriority ) );
-        configASSERT( ullRunningInterruptPriority == ( portLOWEST_USABLE_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) );
+        configASSERT( portICCRPR_RUNNING_PRIORITY_REGISTER == ( uint32_t ) ( portLOWEST_USABLE_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) );
     }
     #endif
 
@@ -353,7 +439,7 @@ void FreeRTOS_Tick_Handler( void )
     {
         uint32_t ulMaskBits;
 
-        __asm volatile ( "MRS %0, DAIF" : "=r" ( ulMaskBits )::"memory" );
+        __asm volatile ( "mrs %0, daif" : "=r" ( ulMaskBits )::"memory" );
         configASSERT( ( ulMaskBits & portDAIF_I ) != 0 );
     }
     #endif /* configASSERT_DEFINED */
@@ -363,11 +449,9 @@ void FreeRTOS_Tick_Handler( void )
      * so there is no need to save and restore the current mask value.  It is
      * necessary to turn off interrupts in the CPU itself while the ICCPMR is being
      * updated. */
-    /* s3_0_c4_c6_0 is ICC_PMR_EL1. */
-    __asm volatile ( "MSR s3_0_c4_c6_0, %0      \n"
-                     "DSB SY                    \n"
-                     "ISB SY                    \n"
-                     ::"r" ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) : "memory" );
+    portICCPMR_PRIORITY_MASK_REGISTER = ( uint32_t ) ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT );
+    __asm volatile ( "dsb sy     \n"
+                     "isb sy     \n" ::: "memory" );
 
     /* Ok to enable interrupts after the interrupt source has been cleared. */
     configCLEAR_TICK_INTERRUPT();
@@ -384,15 +468,19 @@ void FreeRTOS_Tick_Handler( void )
 }
 /*-----------------------------------------------------------*/
 
-void vPortTaskUsesFPU( void )
-{
-    /* A task is registering the fact that it needs an FPU context.  Set the
-     * FPU flag (which is saved as part of the task context). */
-    ullPortTaskHasFPUContext = pdTRUE;
+#if ( configUSE_TASK_FPU_SUPPORT != 2 )
 
-    /* Consider initialising the FPSR here - but probably not necessary in
-     * AArch64. */
-}
+    void vPortTaskUsesFPU( void )
+    {
+        /* A task is registering the fact that it needs an FPU context.  Set the
+         * FPU flag (which is saved as part of the task context). */
+        ullPortTaskHasFPUContext = pdTRUE;
+
+        /* Consider initialising the FPSR here - but probably not necessary in
+         * AArch64. */
+    }
+
+#endif /* configUSE_TASK_FPU_SUPPORT */
 /*-----------------------------------------------------------*/
 
 void vPortClearInterruptMask( UBaseType_t uxNewMaskValue )
@@ -407,15 +495,12 @@ void vPortClearInterruptMask( UBaseType_t uxNewMaskValue )
 UBaseType_t uxPortSetInterruptMask( void )
 {
     uint32_t ulReturn;
-    uint64_t ullPMRValue;
 
     /* Interrupt in the CPU must be turned off while the ICCPMR is being
      * updated. */
     portDISABLE_INTERRUPTS();
-    /* s3_0_c4_c6_0 is ICC_PMR_EL1. */
-    __asm volatile ( "MRS %0, s3_0_c4_c6_0" : "=r" ( ullPMRValue ) );
 
-    if( ullPMRValue == ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) )
+    if( portICCPMR_PRIORITY_MASK_REGISTER == ( uint32_t ) ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) )
     {
         /* Interrupts were already masked. */
         ulReturn = pdTRUE;
@@ -423,11 +508,9 @@ UBaseType_t uxPortSetInterruptMask( void )
     else
     {
         ulReturn = pdFALSE;
-        /* s3_0_c4_c6_0 is ICC_PMR_EL1. */
-        __asm volatile ( "MSR s3_0_c4_c6_0, %0      \n"
-                         "DSB SY                    \n"
-                         "ISB SY                    \n"
-                         ::"r" ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) : "memory" );
+        portICCPMR_PRIORITY_MASK_REGISTER = ( uint32_t ) ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT );
+        __asm volatile ( "dsb sy     \n"
+                         "isb sy     \n" ::: "memory" );
     }
 
     portENABLE_INTERRUPTS();
@@ -454,11 +537,19 @@ UBaseType_t uxPortSetInterruptMask( void )
          *
          * FreeRTOS maintains separate thread and ISR API functions to ensure
          * interrupt entry is as fast and simple as possible. */
-        uint64_t ullRunningInterruptPriority;
-        /* s3_0_c12_c11_3 is ICC_RPR_EL1. */
-        __asm volatile ( "MRS %0, s3_0_c12_c11_3" : "=r" ( ullRunningInterruptPriority ) );
+        configASSERT( portICCRPR_RUNNING_PRIORITY_REGISTER >= ( uint32_t ) ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) );
 
-        configASSERT( ullRunningInterruptPriority >= ( configMAX_API_CALL_INTERRUPT_PRIORITY << portPRIORITY_SHIFT ) );
+        /* Priority grouping:  The interrupt controller (GIC) allows the bits
+         * that define each interrupt's priority to be split between bits that
+         * define the interrupt's pre-emption priority bits and bits that define
+         * the interrupt's sub-priority.  For simplicity all bits must be defined
+         * to be pre-emption priority bits.  The following assertion will fail if
+         * this is not the case (if some bits represent a sub-priority).
+         *
+         * The priority grouping is configured by the GIC's binary point register
+         * (ICCBPR).  Writing 0 to ICCBPR will ensure it is set to its lowest
+         * possible value (which may be above 0). */
+        configASSERT( ( portICCBPR_BINARY_POINT_REGISTER & portBINARY_POINT_BITS ) <= portMAX_BINARY_POINT_VALUE );
     }
 
 #endif /* configASSERT_DEFINED */

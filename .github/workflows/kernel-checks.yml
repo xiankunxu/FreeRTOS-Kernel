@@ -5,7 +5,7 @@ on: [push, pull_request]
 jobs:
   kernel-checker:
     name: FreeRTOS Kernel Header Checks
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-latest
     steps:
       # Install python 3
       - name: Tool Setup
@@ -15,7 +15,7 @@ jobs:
 
       # There is shared code, hosted by FreeRTOS/FreeRTOS, with deps needed by header checker
       - name: Checkout FreeRTOS Tools
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4.1.1
         with:
           repository: FreeRTOS/FreeRTOS
           sparse-checkout: '.github'
@@ -24,7 +24,7 @@ jobs:
 
       # Checkout user pull request changes
       - name: Checkout Pull Request
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4.1.1
         with:
           path: inspect
 

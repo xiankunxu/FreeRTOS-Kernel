@@ -1,6 +1,6 @@
 /*
  * FreeRTOS Kernel <DEVELOPMENT BRANCH>
- * Copyright (C) 2021 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ * Copyright (C) 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * SPDX-License-Identifier: MIT
  *
@@ -33,10 +33,10 @@
     .set SVC_MODE,  0x13
     .set IRQ_MODE,  0x12
 
-    /* Hardware registers. */
-    .extern ulICCIAR
-    .extern ulICCEOIR
-    .extern ulICCPMR
+    /* Hardware registers addresses. */
+    .extern ulICCIARAddress
+    .extern ulICCEOIRAddress
+    .extern ulICCPMRAddress
 
     /* Variables and functions. */
     .extern ulMaxAPIPriorityMask
@@ -246,7 +246,7 @@ exit_without_switch:
     MOVS    PC, LR
 
 switch_before_exit:
-    /* A context swtich is to be performed.  Clear the context switch pending
+    /* A context switch is to be performed.  Clear the context switch pending
     flag. */
     MOV     r0, #0
     STR     r0, [r1]
@@ -302,7 +302,7 @@ switch_before_exit:
 vApplicationIRQHandler:
     PUSH    {LR}
     FMRX    R1,  FPSCR
-    VPUSH   {D0-D15}
+    VPUSH   {D0-D7}
     VPUSH   {D16-D31}
     PUSH    {R1}
 
@@ -311,15 +311,15 @@ vApplicationIRQHandler:
 
     POP     {R0}
     VPOP    {D16-D31}
-    VPOP    {D0-D15}
+    VPOP    {D0-D7}
     VMSR    FPSCR, R0
 
     POP {PC}
 
 
-ulICCIARConst:  .word ulICCIAR
-ulICCEOIRConst: .word ulICCEOIR
-ulICCPMRConst: .word ulICCPMR
+ulICCIARConst:  .word ulICCIARAddress
+ulICCEOIRConst: .word ulICCEOIRAddress
+ulICCPMRConst: .word ulICCPMRAddress
 pxCurrentTCBConst: .word pxCurrentTCB
 ulCriticalNestingConst: .word ulCriticalNesting
 ulPortTaskHasFPUContextConst: .word ulPortTaskHasFPUContext

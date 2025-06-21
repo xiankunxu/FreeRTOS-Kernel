@@ -1,6 +1,6 @@
 /*
  * FreeRTOS Kernel <DEVELOPMENT BRANCH>
- * Copyright (C) 2021 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ * Copyright (C) 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * SPDX-License-Identifier: MIT
  *
@@ -207,7 +207,7 @@ secureportNON_SECURE_CALLABLE void SecureContext_Init( void )
      * securecontextNO_STACK when no secure context is loaded. */
     if( ( ulIPSR != 0 ) && ( pucStackLimit == securecontextNO_STACK ) )
     {
-        /* Ontain a free secure context. */
+        /* Obtain a free secure context. */
         ulSecureContextIndex = ulGetSecureContext( pvTaskHandle );
 
         /* Were we able to get a free context? */

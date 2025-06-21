@@ -1,6 +1,6 @@
 /*
  * FreeRTOS Kernel <DEVELOPMENT BRANCH>
- * Copyright (C) 2021 Amazon.com, Inc. or its affiliates.  All Rights Reserved.
+ * Copyright (C) 2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * SPDX-License-Identifier: MIT
  *
@@ -157,7 +157,7 @@ void FreeRTOS_Tick_Handler( void );
 
 #endif /* configUSE_PORT_OPTIMISED_TASK_SELECTION */
 
-#ifdef configASSERT
+#if ( configASSERT_DEFINED == 1 )
     void vPortValidateInterruptPriority( void );
     #define portASSERT_IF_INTERRUPT_PRIORITY_INVALID()    vPortValidateInterruptPriority()
 #endif /* configASSERT */
