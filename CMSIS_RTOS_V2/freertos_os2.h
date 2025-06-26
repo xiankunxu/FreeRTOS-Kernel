@@ -350,13 +350,11 @@
   */
   #error "Definition configMAX_PRIORITIES must equal 10 to implement Thread Management API."
 #endif
-#if (configUSE_PORT_OPTIMISED_TASK_SELECTION != 0)
+#if (configUSE_PORT_OPTIMISED_TASK_SELECTION != 1)
   /*
-    CMSIS-RTOS2 requires handling of 56 different priorities (see osPriority_t) while FreeRTOS port
-    optimised selection for Cortex core only handles 32 different priorities.
-    Set #define configUSE_PORT_OPTIMISED_TASK_SELECTION 0 to fix this error.
+    Forces FreeRTOS to use port optimised task selection algorithm to improve performance
   */
-  #error "Definition configUSE_PORT_OPTIMISED_TASK_SELECTION must be zero to implement Thread Management API."
+  #error "Definition configUSE_PORT_OPTIMISED_TASK_SELECTION must be 1 to implement Thread Management API."
 #endif
 
 #ifndef configKERNEL_PROVIDED_STATIC_MEMORY
