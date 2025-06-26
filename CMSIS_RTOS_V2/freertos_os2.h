@@ -357,7 +357,7 @@
   #error "Definition configUSE_PORT_OPTIMISED_TASK_SELECTION must be 1 to implement Thread Management API."
 #endif
 
-#ifndef configKERNEL_PROVIDED_STATIC_MEMORY
+#if (configKERNEL_PROVIDED_STATIC_MEMORY != 1)
   /*
     CMSIS-RTOS2 requires that FreeRTOS kernel provides static memory allocation for
     control blocks and stacks.
