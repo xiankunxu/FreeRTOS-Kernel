@@ -240,6 +240,7 @@ add_library(freertos_kernel STATIC)
 ########################################################################
 add_subdirectory(include)
 add_subdirectory(portable)
+add_subdirectory(CMSIS_RTOS_V2)
 
 target_sources(freertos_kernel PRIVATE
     croutine.c
@@ -262,8 +263,7 @@ endif()
 
 target_link_libraries(freertos_kernel
     PUBLIC
-        freertos_kernel_include
-        freertos_kernel_port_headers
+        cmsis_rtos_v2  # cmsis_rtos_v2 already target_includes freertos_kernel_include and freertos_kernel_port_headers
     PRIVATE
         freertos_kernel_port
 
