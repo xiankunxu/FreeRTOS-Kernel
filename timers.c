@@ -473,10 +473,21 @@
             {
                 if( xTaskGetSchedulerState() == taskSCHEDULER_RUNNING )
                 {
+                /* NOTE: Inside timer task, the call of xTimerGenericCommand always have xTicksToWait=0, so timer task will not make itself be 
+				 * blocked by sending to xTimerQueue. (It will block it by waiting to receive on xTimerQueue, but it knows that block will
+				 * not cause any missing timers.) 
+				 * However, other tasks that call this function might cause that calling task get into block state.
+				 */
+				/* This needs xTimerQueue's size to be large enough to make timer command can be sent successfully. */
                     xReturn = xQueueSendToBack( xTimerQueue, &xMessage, xTicksToWait );
                 }
                 else
                 {
+                /* NOTE: Use tmrNO_DELAY=0 to prevent current task to block itself when scheduler suspended
+				 * When add item to the queue, it might unblock a task waiting for receiving, but the 
+				 * unblocked task will be added to pendingReady list, so a PendSV call will not cause
+				 * context switch.
+				 */
                     xReturn = xQueueSendToBack( xTimerQueue, &xMessage, tmrNO_DELAY );
                 }
             }
@@ -711,6 +722,7 @@
     }
 /*-----------------------------------------------------------*/
 
+/* NOTE: xNextExpireTime would be more appropriately be xLastExpireTime */
     static void prvProcessExpiredTimer( const TickType_t xNextExpireTime,
                                         const TickType_t xTimeNow )
     {
@@ -796,6 +808,8 @@
                 if( ( xListWasEmpty == pdFALSE ) && ( xNextExpireTime <= xTimeNow ) )
                 {
                     ( void ) xTaskResumeAll();
+                /* NOTE: Only process the first expired timer on the pxCurrentTimerList, then will not block, go to
+				 * next loop round to process the next expired timer (if any) */
                     prvProcessExpiredTimer( xNextExpireTime, xTimeNow );
                 }
                 else
@@ -817,6 +831,9 @@
 
                     if( xTaskResumeAll() == pdFALSE )
                     {
+                    /* NOTE: == pdFALSE makes current task will always yield. Either setup pensv
+					 * in xTaskResumeAll, or below use portYIELD_WITHIN_API().
+					 */
                         /* Yield to wait for either a command to arrive, or the
                          * block time to expire.  If a command arrived between the
                          * critical section being exited and this yield then the yield
@@ -831,6 +848,8 @@
             }
             else
             {
+            /* NOTE: timer lists switched, will not block, go to next loop to read queue msgs/set next unblock time based on the new pCurrentTimerList */
+			/* If xTimerListsWereSwitched == true, then all timers in previous timerList have already been processed in prvSampleTimeout */
                 ( void ) xTaskResumeAll();
             }
         }
@@ -887,6 +906,7 @@
     }
 /*-----------------------------------------------------------*/
 
+/* NOTE: More appropriately, xCommandTime should be changed to xLastExpiryTime */
     static BaseType_t prvInsertTimerInActiveList( Timer_t * const pxTimer,
                                                   const TickType_t xNextExpiryTime,
                                                   const TickType_t xTimeNow,
@@ -975,6 +995,9 @@
                     if( listIS_CONTAINED_WITHIN( NULL, &( pxTimer->xTimerListItem ) ) == pdFALSE )
                     {
                         /* The timer is in a list, remove it. */
+                /* NOTE: One scenario is that the timer is in the timerList, but a change period command is sent, so first need to remove it from the timer list
+				 * Then insert it again with the new expire time.
+				 */
                         ( void ) uxListRemove( &( pxTimer->xTimerListItem ) );
                     }
                     else
@@ -1086,6 +1109,7 @@
     }
 /*-----------------------------------------------------------*/
 
+/* NOTE: xNextExpireTime would be more appropriately be renamed to xLastExpireTime */
     static void prvSwitchTimerLists( void )
     {
         TickType_t xNextExpireTime;

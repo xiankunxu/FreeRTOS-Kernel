@@ -46,9 +46,12 @@ typedef struct MemPoolDef_t {
   uint32_t           bl_cnt;    /* Number of blocks        */
   uint32_t           n;         /* Block allocation index  */
   volatile uint32_t  status;    /* Object status flags     */
+  uint32_t           ever_max_used_blks; /* Ever maximum used blocks */
 #if (configSUPPORT_STATIC_ALLOCATION == 1)
   StaticSemaphore_t  mem_sem;   /* Semaphore object memory */
 #endif
+  struct MemPoolDef_t *next; /* Pointer to next pool in the list */
+  struct MemPoolDef_t *prev; /* Pointer to previous pool in the list */
 } MemPool_t;
 
 /* No need to hide static object type, just align to coding style */
@@ -59,5 +62,7 @@ typedef struct MemPoolDef_t {
 
 /* Define size of the byte array required to create count of blocks of given size */
 #define MEMPOOL_ARR_SIZE(bl_count, bl_size) (((((bl_size) + (4 - 1)) / 4) * 4)*(bl_count))
+
+extern MemPool_t* g_memPoolList;  /* Global memory pool list */
 
 #endif /* FREERTOS_MPOOL_H_ */

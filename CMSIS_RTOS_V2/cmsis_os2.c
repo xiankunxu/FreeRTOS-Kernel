@@ -24,7 +24,6 @@
 
 #include "cmsis_os2.h"                  // ::CMSIS:RTOS2
 #include "cmsis_compiler.h"             // Compiler agnostic definitions
-//#include "os_tick.h"                    // OS Tick API
 
 #include "FreeRTOS.h"                   // ARM.FreeRTOS::RTOS:Core
 #include "task.h"                       // ARM.FreeRTOS::RTOS:Core
@@ -2470,6 +2469,8 @@ static void  FreeBlock   (MemPool_t *mp, void *block);
 static void *AllocBlock  (MemPool_t *mp);
 static void *CreateBlock (MemPool_t *mp);
 
+MemPool_t* g_memPoolList = NULL;
+
 /*
   Create and Initialize a Memory Pool object.
 */
@@ -2564,6 +2565,13 @@ osMemoryPoolId_t osMemoryPoolNew (uint32_t block_count, uint32_t block_size, con
       mp->bl_sz   = block_size;
       mp->bl_cnt  = block_count;
       mp->n       = 0U;
+      mp->ever_max_used_blks = 0U;
+      mp->next    = g_memPoolList;
+      mp->prev    = NULL;
+      if (g_memPoolList != NULL) {
+        g_memPoolList->prev = mp;
+      }
+      g_memPoolList = mp;
 
       /* Set heap allocated memory flags */
       mp->status = MPOOL_STATUS;
@@ -2635,6 +2643,13 @@ void *osMemoryPoolAlloc (osMemoryPoolId_t mp_id, uint32_t timeout) {
           if (xSemaphoreTakeFromISR (mp->sem, NULL) == pdTRUE) {
             if ((mp->status & MPOOL_STATUS) == MPOOL_STATUS) {
               isrm  = taskENTER_CRITICAL_FROM_ISR();
+              /* Should call FromISR version as the normal version might set the
+               * basepri to 0 when function exit, but here it does not reach
+               * taskEXIT_CRITICAL_FROM_ISR */
+              UBaseType_t nBlkUsed = uxQueueSpacesAvailableFromISR (mp->sem);
+              if (nBlkUsed > mp->ever_max_used_blks) {
+                mp->ever_max_used_blks = nBlkUsed;
+              }
 
               /* Get a block from the free-list */
               block = AllocBlock(mp);
@@ -2657,6 +2672,12 @@ void *osMemoryPoolAlloc (osMemoryPoolId_t mp_id, uint32_t timeout) {
         if (xSemaphoreTake (mp->sem, (TickType_t)timeout) == pdTRUE) {
           if ((mp->status & MPOOL_STATUS) == MPOOL_STATUS) {
             taskENTER_CRITICAL();
+            /* Can call uxQueueSpacesAvailable as it has nested taskENTER/EXIT_CRITICAL.
+             * Only the outer most taskEXIT_CRITICAL will reset the basepri */
+            UBaseType_t nBlkUsed = uxQueueSpacesAvailable (mp->sem);
+            if (nBlkUsed > mp->ever_max_used_blks) {
+              mp->ever_max_used_blks = nBlkUsed;
+            }
 
             /* Get a block from the free-list */
             block = AllocBlock(mp);

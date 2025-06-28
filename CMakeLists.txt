@@ -250,6 +250,7 @@ target_sources(freertos_kernel PRIVATE
     stream_buffer.c
     tasks.c
     timers.c
+    freertos_stats.cpp
 )
 
 if (DEFINED FREERTOS_HEAP )

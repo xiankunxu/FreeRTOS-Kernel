@@ -77,6 +77,17 @@ typedef struct QueueDefinition   * QueueSetMemberHandle_t;
 #define queueQUEUE_TYPE_RECURSIVE_MUTEX       ( ( uint8_t ) 4U )
 #define queueQUEUE_TYPE_SET                   ( ( uint8_t ) 5U )
 
+typedef struct xQUEUE_STATUS
+{
+    const char * pcQueueName;
+    UBaseType_t uxLength;
+    UBaseType_t uxItemSize;
+    UBaseType_t uxMessagesWaiting;
+    #if ( configUSE_TRACE_FACILITY == 1 )
+        uint16_t ucEverMaxMessagesWaiting;
+    #endif
+} QueueStatus_t;
+
 /**
  * queue. h
  * @code{c}
@@ -950,6 +961,7 @@ UBaseType_t uxQueueMessagesWaiting( const QueueHandle_t xQueue ) PRIVILEGED_FUNC
  */
 UBaseType_t uxQueueSpacesAvailable( const QueueHandle_t xQueue ) PRIVILEGED_FUNCTION;
 
+UBaseType_t uxQueueSpacesAvailableFromISR( const QueueHandle_t xQueue ) PRIVILEGED_FUNCTION;
 /**
  * queue. h
  * @code{c}
@@ -1566,6 +1578,10 @@ BaseType_t xQueueGiveMutexRecursive( QueueHandle_t xMutex ) PRIVILEGED_FUNCTION;
                               const char * pcQueueName ) PRIVILEGED_FUNCTION;
 #endif
 
+#if ( configQUEUE_REGISTRY_SIZE > 0 )
+    UBaseType_t uxQueueGetSystemState( QueueStatus_t * const pxQueueStatusArray,
+                                       const UBaseType_t uxArraySize) PRIVILEGED_FUNCTION;
+#endif
 /*
  * The registry is provided as a means for kernel aware debuggers to
  * locate queues, semaphores and mutexes.  Call vQueueAddToRegistry() add

@@ -527,6 +527,8 @@ static const volatile UBaseType_t uxTopUsedPriority = configMAX_PRIORITIES - 1U;
  * Updates to uxSchedulerSuspended must be protected by both the task lock and the ISR lock
  * and must not be done from an ISR. Reads must be protected by either lock and may be done
  * from either an ISR or a task. */
+/* NOTE: The reason is that pending ready list can be accessed both by ISR and task context, so
+ * need to ensure mutual exclusion when accessing it. */
 PRIVILEGED_DATA static volatile UBaseType_t uxSchedulerSuspended = ( UBaseType_t ) 0U;
 
 #if ( configGENERATE_RUN_TIME_STATS == 1 )
@@ -1851,6 +1853,11 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
      * grows from high memory to low (as per the 80x86) or vice versa.
      * portSTACK_GROWTH is used to make the result positive or negative as required
      * by the port. */
+    /* NOTE:
+     * low address ====================================> high address
+	 * pxStack------------------->pxTopOfStack---------->pxEndOfStack
+	 *                            <------pxTopOfStack goes this direction when push things into the stack
+	 */
     #if ( portSTACK_GROWTH < 0 )
     {
         pxTopOfStack = &( pxNewTCB->pxStack[ uxStackDepth - ( configSTACK_DEPTH_TYPE ) 1 ] );
@@ -2226,6 +2233,10 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             configASSERT( pxTCB != NULL );
 
             /* Remove task from the ready/delayed list. */
+            /* What if pxTCB is in delayedList? No worries, in taskRESET_READY_PRIORITY will 
+			 * check if pxReadyTasksLists[ ( uxPriority ) is empty, only adjust uxTopReadyPriority
+			 * if the list is empty.
+			 */
             if( uxListRemove( &( pxTCB->xStateListItem ) ) == ( UBaseType_t ) 0 )
             {
                 taskRESET_READY_PRIORITY( pxTCB->uxPriority );
@@ -2374,6 +2385,9 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         configASSERT( pxPreviousWakeTime );
         configASSERT( ( xTimeIncrement > 0U ) );
 
+        /* NOTE: When this function is called, context switch will be suspended. Also, ISR will not touch stateItem related
+		 * lists, so current task can access these lists without critical section. */
+		/* In this specific case, it is used to protect the suspendList, delayedList that are accessed in prvAddCurrentTaskToDelayedList */
         vTaskSuspendAll();
         {
             /* Minor optimisation.  The tick count cannot change in this
@@ -2436,6 +2450,10 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
 
         /* Force a reschedule if xTaskResumeAll has not already done so, we may
          * have put ourselves to sleep. */
+		/* NOTE: The reason is that xTaskResumeAll might not wake any other tasks (which requires other tasks
+		 * are either in pendingDelayedList and has higher priority than the current task, or a task is waked
+		 * up by the xTaskIncrementTick that has higher priority than the current task). Otherwise even though
+		 * the current task was put into the delayed list, it is still running. So needs to force a context switch. */
         if( xAlreadyYielded == pdFALSE )
         {
             taskYIELD_WITHIN_API();
@@ -2694,6 +2712,9 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
         /* MISRA Ref 4.7.1 [Return value shall be checked] */
         /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#dir-47 */
         /* coverity[misra_c_2012_directive_4_7_violation] */
+		/* NOTE: Doing so prevents other ISRs that might call *FromISR APIs be triggered. So
+		 * created a critical section, as even though ISRs with priority higher than portSET_INTERRUPT_MASK_FROM_ISR
+		 * can still be triggered to preempt current ISR, but they will not access the FreeRTOS APIs. */
         uxSavedInterruptStatus = ( UBaseType_t ) taskENTER_CRITICAL_FROM_ISR();
         {
             /* If null is passed in here then it is the priority of the calling
@@ -2837,6 +2858,10 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
             }
             #endif
 
+			/* NOTE: Only set when basePriority does not equal to new Priority. This is because pxTCB's uxPriority might
+			 * be set due to priority inheritance. Set task's priority is supposed to only change the base priority,
+			 * after changing base priority, if its uxPriority is less than base priority, then raise it to base priority.
+			 */
             if( uxCurrentBasePriority != uxNewPriority )
             {
                 /* The priority change may have readied a task of higher
@@ -2866,6 +2891,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                              * priority task able to run so no yield is required. */
                         }
                     }
+                    /* uxNewPriority < uxCurrentBasePriority */
                     #else /* #if ( configNUMBER_OF_CORES == 1 ) */
                     {
                         /* The priority of a task is being raised so
@@ -2903,6 +2929,9 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                     /* Only change the priority being used if the task is not
                      * currently using an inherited priority or the new priority
                      * is bigger than the inherited priority. */
+                    /* NOTE: What if pxTCB->uxBasePriority < pxTCB->uxPriority < uxNewPriority? 
+					 * In this case should raise both uxBasePriority and uxPriority */
+					/* IMO, this should changed to if (pxTCB->uxPriority < uxNewPriority) */
                     if( ( pxTCB->uxBasePriority == pxTCB->uxPriority ) || ( uxNewPriority > pxTCB->uxPriority ) )
                     {
                         pxTCB->uxPriority = uxNewPriority;
@@ -2925,6 +2954,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                  * being used for anything else. */
                 if( ( listGET_LIST_ITEM_VALUE( &( pxTCB->xEventListItem ) ) & taskEVENT_LIST_ITEM_VALUE_IN_USE ) == ( ( TickType_t ) 0U ) )
                 {
+                    /* Need to update its position if it is already in an event list */
                     listSET_LIST_ITEM_VALUE( &( pxTCB->xEventListItem ), ( ( TickType_t ) configMAX_PRIORITIES - ( TickType_t ) uxNewPriority ) );
                 }
                 else
@@ -3290,6 +3320,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                     }
                     else
                     {
+                        /* To update the pxCurrentTCB, even though the scheduler is not running */
                         vTaskSwitchContext();
                     }
                 }
@@ -3508,6 +3539,7 @@ static void prvInitialiseNewTask( TaskFunction_t pxTaskCode,
                     /* The delayed or ready lists cannot be accessed so the task
                      * is held in the pending ready list until the scheduler is
                      * unsuspended. */
+                    /* NOTE: When scheduler suspended, ISR can not touch any task's stateListItem */
                     vListInsertEnd( &( xPendingReadyList ), &( pxTCB->xEventListItem ) );
                 }
 
@@ -3731,6 +3763,11 @@ void vTaskStartScheduler( void )
          * the created tasks contain a status word with interrupts switched on
          * so interrupts will automatically get re-enabled when the first task
          * starts to run. */
+        /* NOTE: In prvPortStartFirstTask and vPortSVCHandler will call
+		 * cspie i
+		 * cspie f
+		 * msr basepri #0
+		 * These three re-enable interrupts */
         portDISABLE_INTERRUPTS();
 
         #if ( configUSE_C_RUNTIME_TLS_SUPPORT == 1 )
@@ -3865,6 +3902,11 @@ void vTaskSuspendAll( void )
          *    uxSchedulerSuspended will be the correct value of 1, even though
          *    the variable was used by other tasks in the mean time.
          */
+    /* NOTE: This function might be called multiple times by the current running task,
+	 * so uxSchedulerSuspended might be > 1. But in vTaskResumeAll, current task
+	 * will only move tasks out of xPendingReadyList when uxSchedulerSuspended is 0.
+	 * uxSchedulerSuspended==0 means the outermost call to vTaskSuspendAll() has
+	 * completed. */
 
         /* portSOFTWARE_BARRIER() is only implemented for emulated/simulated ports that
          * do not otherwise exhibit real time behaviour. */
@@ -4049,7 +4091,9 @@ BaseType_t xTaskResumeAll( void )
                         pxTCB = listGET_OWNER_OF_HEAD_ENTRY( ( &xPendingReadyList ) );
                         listREMOVE_ITEM( &( pxTCB->xEventListItem ) );
                         portMEMORY_BARRIER();
+                        /* NOTE: pxTCB's stateListItem must be in delayed/suspended lists so need to first remove it from the list then add it to ready list */
                         listREMOVE_ITEM( &( pxTCB->xStateListItem ) );
+                        /* NOTE: Here eventListItem was added by ISR into pendingReadyList. ISR didn't touch stateListItem, it was previously added by pxTCB to the delayedList */
                         prvAddTaskToReadyList( pxTCB );
 
                         #if ( configNUMBER_OF_CORES == 1 )
@@ -4256,6 +4300,10 @@ char * pcTaskGetName( TaskHandle_t xTaskToQuery )
 
         if( listCURRENT_LIST_LENGTH( pxList ) > ( UBaseType_t ) 0 )
         {
+            /* NOTE: This changes the pxList->pxIndex, as a result, changes the order of the tasks in the same list.
+			 * For example, in the same readyList, first pxIndex points to task A, after multiple calling, pxIndex
+			 * points to task B. Then later would first unblock B instead of A! */
+			/* It would be good to record pxIndex of pxList, then restore it after break the loop. */
             for( pxIterator = listGET_HEAD_ENTRY( pxList ); pxIterator != pxEndMarker; pxIterator = listGET_NEXT( pxIterator ) )
             {
                 /* MISRA Ref 11.5.3 [Void pointer assignment] */
@@ -4654,6 +4702,8 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
                  * the event list too.  Interrupts can touch the event list item,
                  * even though the scheduler is suspended, so a critical section
                  * is used. */
+                /* NOTE: When uxSchedulerSuspended is set, ISR will put a to be unblocked
+				 * task's eventListItem into the xPendingReadyList. */
                 taskENTER_CRITICAL();
                 {
                     if( listLIST_ITEM_CONTAINER( &( pxTCB->xEventListItem ) ) != NULL )
@@ -4722,6 +4772,8 @@ BaseType_t xTaskCatchUpTicks( TickType_t xTicksToCatchUp )
 #endif /* INCLUDE_xTaskAbortDelay */
 /*----------------------------------------------------------*/
 
+/* NOTE: Only gets called in xTaskResumeAll and SystickHandler. Critical section is not required here.
+ * As it is already been protected within a critical section in xTaskResumeAll and in SystickHandler. */
 BaseType_t xTaskIncrementTick( void )
 {
     TCB_t * pxTCB;
@@ -5106,6 +5158,8 @@ BaseType_t xTaskIncrementTick( void )
 /*-----------------------------------------------------------*/
 
 #if ( configNUMBER_OF_CORES == 1 )
+/* NOTE: This function is get called either when the scheduler is not running, or within the PendSV ISR handler.
+ * So no race condition issue, no need to guarded by critical section. */
     void vTaskSwitchContext( void )
     {
         traceENTER_vTaskSwitchContext();
@@ -5164,6 +5218,8 @@ BaseType_t xTaskIncrementTick( void )
             /* MISRA Ref 11.5.3 [Void pointer assignment] */
             /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#rule-115 */
             /* coverity[misra_c_2012_rule_11_5_violation] */
+        /* NOTE: critical section is not required here since vTaskSwitchContext is only literally called in two places, one in vTaskSwitchContext 
+		 * with scheduler suspended. Another in pendSV handerler that temperarily raised base pri. */
             taskSELECT_HIGHEST_PRIORITY_TASK();
             traceTASK_SWITCHED_IN();
 
@@ -5314,8 +5370,14 @@ void vTaskPlaceOnEventList( List_t * const pxEventList,
      *
      * The queue that contains the event list is locked, preventing
      * simultaneous access from interrupts. */
+    /* NOTE: This will touch both the eventListItem and stateListItem of the current TCB,
+	 * when scheduler is suspend, the ISR might also touch a task's eventListItem.
+	 * But that only happens when the eventList is not locked. If locked, only current
+	 * task can touch the eventList, so no race condition. */
     vListInsert( pxEventList, &( pxCurrentTCB->xEventListItem ) );
 
+	/* NOTE: With interrupts disabled or scheduler disabled, the delay list will not be touched,
+	 * also current TCB's stateListItem will not be touched, so no race condition */
     prvAddCurrentTaskToDelayedList( xTicksToWait, pdTRUE );
 
     traceRETURN_vTaskPlaceOnEventList();
@@ -5395,11 +5457,15 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
 {
     TCB_t * pxUnblockedTCB;
     BaseType_t xReturn;
+    /* NOTE: xQueueGenericSendFromISR does not call this function if the queue is locked */
 
     traceENTER_xTaskRemoveFromEventList( pxEventList );
 
     /* THIS FUNCTION MUST BE CALLED FROM A CRITICAL SECTION.  It can also be
      * called from a critical section within an ISR. */
+    /* NOTE: This is to prevent race condition on xPendingReadyList, as both ISR and the running
+	 * task can access it. A critical section within ISR means the BASERPI is set so no
+	 * other ISRs can access this pxEventList. */
 
     /* The event list is sorted in priority order, so the first in the list can
      * be removed as it is known to be the highest priority.  Remove the TCB from
@@ -5416,6 +5482,8 @@ BaseType_t xTaskRemoveFromEventList( const List_t * const pxEventList )
     /* coverity[misra_c_2012_rule_11_5_violation] */
     pxUnblockedTCB = listGET_OWNER_OF_HEAD_ENTRY( pxEventList );
     configASSERT( pxUnblockedTCB );
+    /* NOTE: It seems ISR will access a task's eventListItem and the event list it is in no matter 
+	 * if scheduler is suspended or not */
     listREMOVE_ITEM( &( pxUnblockedTCB->xEventListItem ) );
 
     if( uxSchedulerSuspended == ( UBaseType_t ) 0U )
@@ -6658,6 +6726,7 @@ static void prvResetNextTaskUnblockTime( void )
                 if( ( listGET_LIST_ITEM_VALUE( &( pxMutexHolderTCB->xEventListItem ) ) & taskEVENT_LIST_ITEM_VALUE_IN_USE ) == ( ( TickType_t ) 0U ) )
                 {
                     listSET_LIST_ITEM_VALUE( &( pxMutexHolderTCB->xEventListItem ), ( TickType_t ) configMAX_PRIORITIES - ( TickType_t ) pxCurrentTCB->uxPriority );
+                    /* NOTE: If the event list item is already in a event list, should change its position */
                 }
                 else
                 {
@@ -6741,6 +6810,10 @@ static void prvResetNextTaskUnblockTime( void )
 
     BaseType_t xTaskPriorityDisinherit( TaskHandle_t const pxMutexHolder )
     {
+        /* NOTE: This is the mutex holder to actively return back the mutex (pxMutexHolder == pxCurrentTCB),
+		 * It can also be called when an ISR give back a mutex (pxMutexHolder == NULL case), where the 
+		 * mutex was initially aqcuired in an ISR before. */
+        /* NOTE: CMSIS RTOS V2 forbids mutex acquire and release from ISR context.!!!!!! */
         TCB_t * const pxTCB = pxMutexHolder;
         BaseType_t xReturn = pdFALSE;
 
@@ -6761,6 +6834,7 @@ static void prvResetNextTaskUnblockTime( void )
             if( pxTCB->uxPriority != pxTCB->uxBasePriority )
             {
                 /* Only disinherit if no other mutexes are held. */
+                /* NOTE: Because mutexHolder->uxPriority might also raised by other mutexes priority inheritance */
                 if( pxTCB->uxMutexesHeld == ( UBaseType_t ) 0 )
                 {
                     /* A task can only have an inherited priority if it holds
@@ -6785,6 +6859,7 @@ static void prvResetNextTaskUnblockTime( void )
                     /* Reset the event list item value.  It cannot be in use for
                      * any other purpose if this task is running, and it must be
                      * running to give back the mutex. */
+                    /* NOTE: If current TCB running, its eventListItem can not be used, so do not need to consider to remove it from an event list */
                     listSET_LIST_ITEM_VALUE( &( pxTCB->xEventListItem ), ( TickType_t ) configMAX_PRIORITIES - ( TickType_t ) pxTCB->uxPriority );
                     prvAddTaskToReadyList( pxTCB );
                     #if ( configNUMBER_OF_CORES > 1 )
@@ -6868,6 +6943,11 @@ static void prvResetNextTaskUnblockTime( void )
                  * simplification in the priority inheritance implementation.  If
                  * the task that holds the mutex is also holding other mutexes then
                  * the other mutexes may have caused the priority inheritance. */
+                /* NOTE: The reason is that uxPriority might also be raised by other mutex
+				 * that holding by the mutexHolder. But we don't have access to the 
+				 * other mutex, thus not sure if we need to decrease mutexHolder->uxPriority
+				 * But if mutexHolder holds only one mutex, then we definitely know its 
+				 * priority should be decreased to min(mutexHolder->basePriority, uxPriority of the highest priority task that in the mutex's receiving queue ) */
                 if( pxTCB->uxMutexesHeld == uxOnlyOneMutexHeld )
                 {
                     /* If a task has timed out because it already holds the
@@ -6887,6 +6967,7 @@ static void prvResetNextTaskUnblockTime( void )
                     if( ( listGET_LIST_ITEM_VALUE( &( pxTCB->xEventListItem ) ) & taskEVENT_LIST_ITEM_VALUE_IN_USE ) == ( ( TickType_t ) 0U ) )
                     {
                         listSET_LIST_ITEM_VALUE( &( pxTCB->xEventListItem ), ( TickType_t ) configMAX_PRIORITIES - ( TickType_t ) uxPriorityToUse );
+                        /* NOTE: Should also check if pxTCB is in a event list (say, waiting for another mutex). If yes, update its position in the event list */
                     }
                     else
                     {
@@ -7736,6 +7817,7 @@ TickType_t uxTaskResetEventItemValue( void )
                 {
                     traceTASK_NOTIFY_TAKE_BLOCK( uxIndexToWaitOn );
                     prvAddCurrentTaskToDelayedList( xTicksToWait, pdTRUE );
+                    /* NOTE: When this task is unblocked due to timeout, its ucNotifyState will still be taskWAITING_NOTIFICATION */
                 }
                 else
                 {
@@ -7904,6 +7986,7 @@ TickType_t uxTaskResetEventItemValue( void )
 
 #if ( configUSE_TASK_NOTIFICATIONS == 1 )
 
+	/* Set notification value to a target task, if the target task is already in taskWAITING_NOTIFICATION, unblock it */
     BaseType_t xTaskGenericNotify( TaskHandle_t xTaskToNotify,
                                    UBaseType_t uxIndexToNotify,
                                    uint32_t ulValue,

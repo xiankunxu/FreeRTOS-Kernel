@@ -132,6 +132,7 @@ typedef struct QueueDefinition /* The old naming convention is used to prevent b
     #if ( configUSE_TRACE_FACILITY == 1 )
         UBaseType_t uxQueueNumber;
         uint8_t ucQueueType;
+        uint16_t ucEverMaxMessagesWaiting;
     #endif
 } xQUEUE;
 
@@ -319,6 +320,7 @@ BaseType_t xQueueGenericReset( QueueHandle_t xQueue,
         {
             pxQueue->u.xQueue.pcTail = pxQueue->pcHead + ( pxQueue->uxLength * pxQueue->uxItemSize );
             pxQueue->uxMessagesWaiting = ( UBaseType_t ) 0U;
+            pxQueue->ucEverMaxMessagesWaiting = ( uint16_t ) 0U;
             pxQueue->pcWriteTo = pxQueue->pcHead;
             pxQueue->u.xQueue.pcReadFrom = pxQueue->pcHead + ( ( pxQueue->uxLength - 1U ) * pxQueue->uxItemSize );
             pxQueue->cRxLock = queueUNLOCKED;
@@ -1203,6 +1205,8 @@ BaseType_t xQueueGenericSendFromISR( QueueHandle_t xQueue,
     /* MISRA Ref 4.7.1 [Return value shall be checked] */
     /* More details at: https://github.com/FreeRTOS/FreeRTOS-Kernel/blob/main/MISRA.md#dir-47 */
     /* coverity[misra_c_2012_directive_4_7_violation] */
+    /* NOTE: This makes no race condition for xQueue as other ISRs able to modify this xQuue will
+	 * be masked. */
     uxSavedInterruptStatus = ( UBaseType_t ) taskENTER_CRITICAL_FROM_ISR();
     {
         if( ( pxQueue->uxMessagesWaiting < pxQueue->uxLength ) || ( xCopyPosition == queueOVERWRITE ) )
@@ -1401,6 +1405,10 @@ BaseType_t xQueueGiveFromISR( QueueHandle_t xQueue,
              * priority disinheritance is needed.  Simply increase the count of
              * messages (semaphores) available. */
             pxQueue->uxMessagesWaiting = ( UBaseType_t ) ( uxMessagesWaiting + ( UBaseType_t ) 1 );
+            if ( pxQueue->uxMessagesWaiting > pxQueue->ucEverMaxMessagesWaiting )
+            {
+                pxQueue->ucEverMaxMessagesWaiting = ( uint16_t ) pxQueue->uxMessagesWaiting;
+            }
 
             /* The event list is not altered if the queue is locked.  This will
              * be done when the queue is unlocked later. */
@@ -1795,6 +1803,9 @@ BaseType_t xQueueSemaphoreTake( QueueHandle_t xQueue,
                     {
                         taskENTER_CRITICAL();
                         {
+                            /* NOTE: Why needs critical section here? Seems to protect xMutexHolder->uxPriority, as an ISR
+                             * might tries to gain another/this mutex that is also hold by the xMutexHolder?
+                             * Need to verify if mutex is allowed in ISR context */
                             xInheritanceOccurred = xTaskPriorityInherit( pxQueue->u.xSemaphore.xMutexHolder );
                         }
                         taskEXIT_CRITICAL();
@@ -1854,6 +1865,10 @@ BaseType_t xQueueSemaphoreTake( QueueHandle_t xQueue,
                              * has timed out the priority should be disinherited
                              * again, but only as low as the next highest priority
                              * task that is waiting for the same mutex. */
+                            /* NOTE: After time out, current task's eventListItem was removed by the systick task, so 
+							 * the head item of the queue->xTasksWaitingToReceive will not include current task's
+							 * eventListItem
+							 */
                             uxHighestWaitingPriority = prvGetHighestPriorityOfWaitToReceiveList( pxQueue );
 
                             /* vTaskPriorityDisinheritAfterTimeout uses the uxHighestWaitingPriority
@@ -2245,6 +2260,17 @@ UBaseType_t uxQueueSpacesAvailable( const QueueHandle_t xQueue )
 }
 /*-----------------------------------------------------------*/
 
+UBaseType_t uxQueueSpacesAvailableFromISR( const QueueHandle_t xQueue ) {
+    UBaseType_t uxReturn;
+    Queue_t * const pxQueue = xQueue;
+
+    configASSERT( pxQueue );
+    uxReturn = ( UBaseType_t ) ( pxQueue->uxLength - pxQueue->uxMessagesWaiting );
+
+    return uxReturn;
+}
+/*-----------------------------------------------------------*/
+
 UBaseType_t uxQueueMessagesWaitingFromISR( const QueueHandle_t xQueue )
 {
     UBaseType_t uxReturn;
@@ -2475,6 +2501,10 @@ static BaseType_t prvCopyDataToQueue( Queue_t * const pxQueue,
     }
 
     pxQueue->uxMessagesWaiting = ( UBaseType_t ) ( uxMessagesWaiting + ( UBaseType_t ) 1 );
+    if ( pxQueue->uxMessagesWaiting > pxQueue->ucEverMaxMessagesWaiting )
+    {
+        pxQueue->ucEverMaxMessagesWaiting = ( uint16_t ) pxQueue->uxMessagesWaiting;
+    }
 
     return xReturn;
 }
@@ -3067,6 +3097,35 @@ BaseType_t xQueueIsQueueFullFromISR( const QueueHandle_t xQueue )
 
 #if ( configQUEUE_REGISTRY_SIZE > 0 )
 
+    UBaseType_t uxQueueGetSystemState( QueueStatus_t * const pxQueueStatusArray,
+                                       const UBaseType_t uxArraySize)
+    {
+        configASSERT( pxQueueStatusArray );
+        configASSERT( uxArraySize >= ( UBaseType_t ) configQUEUE_REGISTRY_SIZE );
+
+        /* Copy the information from the registry into the provided array. */
+        UBaseType_t uxQueue = 0;
+        for( UBaseType_t ux = 0; ux < configQUEUE_REGISTRY_SIZE; ux++ )
+        {
+            if( xQueueRegistry[ ux ].xHandle != NULL )
+            {
+                pxQueueStatusArray[ uxQueue ].pcQueueName = xQueueRegistry[ ux ].pcQueueName;
+                pxQueueStatusArray[ uxQueue ].uxLength = xQueueRegistry[ ux ].xHandle->uxLength;
+                pxQueueStatusArray[ uxQueue ].uxItemSize = xQueueRegistry[ ux ].xHandle->uxItemSize;
+                pxQueueStatusArray[ uxQueue ].uxMessagesWaiting = xQueueRegistry[ ux ].xHandle->uxMessagesWaiting;
+                pxQueueStatusArray[ uxQueue ].ucEverMaxMessagesWaiting = xQueueRegistry[ ux ].xHandle->ucEverMaxMessagesWaiting;
+                ++uxQueue;
+            }
+        }
+
+        return uxQueue;
+    }
+
+#endif /* configQUEUE_REGISTRY_SIZE */
+/*-----------------------------------------------------------*/
+
+#if ( configQUEUE_REGISTRY_SIZE > 0 )
+
     const char * pcQueueGetName( QueueHandle_t xQueue )
     {
         UBaseType_t ux;
@@ -3162,7 +3221,7 @@ BaseType_t xQueueIsQueueFullFromISR( const QueueHandle_t xQueue )
          *  the queue is locked, and the calling task blocks on the queue, then the
          *  calling task will be immediately unblocked when the queue is unlocked. */
         prvLockQueue( pxQueue );
-
+		/* NOTE: Lock timerQueue to prevent race condition on the queue's eventLists between timerTask and ISRs */
         if( pxQueue->uxMessagesWaiting == ( UBaseType_t ) 0U )
         {
             /* There is nothing in the queue, block for the specified period. */
