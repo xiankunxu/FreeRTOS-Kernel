@@ -150,7 +150,7 @@ void PrintMainHeapStackUsage()
     extern uint8_t _end; /* Symbol defined in the linker script represents the start of heap */
     extern uint8_t _estack; /* Symbol defined in the linker script represents the top address of stack(one byte more) */
 
-    uint32_t unusedStart = (uint32_t)&_end;
+    uint32_t unusedStart = (uint32_t)&_end + 0x10; /* +0x10 is to has an offset, so make sure later unusedStart - 1 will be a valid address */
     uint32_t unusedEnd;
     uint32_t unusedSize = 0;
 
@@ -186,7 +186,7 @@ void PrintMainHeapStackUsage()
     }
 
     Dc_printf("|%-10s|%-15s|%-15s|%-10s|%-15s|%-16s|%-10s|\r\n",
-        "HeadStart",
+        "HeapStart",
         "EverMaxHeapHigh",
         "EverMaxHeapUsed",
         "StackHigh",
